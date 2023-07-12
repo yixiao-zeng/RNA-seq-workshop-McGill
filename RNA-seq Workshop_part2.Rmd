@@ -1,0 +1,506 @@
+---
+title: "QLSC600 RNA-seq Bootcamp: Part 2" 
+output: 
+  html_document: 
+    keep_md: no 
+    toc: true  
+    toc_depth: 4
+    toc_float: 
+      collapsed: false 
+      smooth_scroll: true
+    theme: flatly  
+    highlight: pygments 
+--- 
+
+### Introduction
+
+So, in Part 1 of the workshop, we worked through our raw data to make it fit for downstream analysis. This type of data is called as processed/clean data.
+
+*** 
+
+```{r, echo = F}
+library(formatR)
+library(rmarkdown)
+library(knitr)
+opts_chunk$set(tidy.opts=list(width.cutoff=10))
+```  
+
+Loading packages:
+
+```{r libraries, warning = FALSE, error = FALSE, message = FALSE}
+library(tidyverse)
+``` 
+
+Loading our processed data from Part 1:  
+
+```{r loading-eNorm}
+eNorm <- read.delim("data/eNorm.txt", sep = "\t")
+eNorm <- eNorm %>% 
+  column_to_rownames(var = "gene")
+
+pDat <- read.delim("data/GSE157103_formatted_pDat.txt", sep = "\t")
+pDat <- pDat %>% 
+  column_to_rownames(var = "ID")
+```
+
+
+### 6.0 PCA  
+
+We'll start with principle component analysis (PCA) - a dimensionality reduction method that accounts for sample variation while maximizing variance.  
+
+```{r pca}
+## Transforming eNorm values to log2(x)+1
+e_log2 <- log2(eNorm + 1)
+
+## Transposing our log(x+1) transposed data frame, so that the columns 
+## become the rows, and the rows become columns. As we want to check 
+## the variance driven by the genes, and not the samples, we transpose 
+## the dataframe to have the rows as the samples, and the columns as the genes, 
+## as the PCA function performs column-wise applications, not row-wise.
+t_log2 <- as.data.frame(t(e_log2))
+
+
+## As our data has already been normalized, we don't want to scale it further. 
+## We do however, want to centre it - meaning standardizing the upper and lower 
+## limits of the distribution of our values
+pca <- prcomp(t_log2, scale = FALSE, center = TRUE)
+
+print(pca)
+summary(pca)
+screeplot(pca)
+
+
+library("factoextra", quietly = TRUE)
+eig.val<-get_eigenvalue(pca)
+head(eig.val)
+
+## Dataframe with all PCs, their variance, and cumulative variance of all PCs
+summary <- data.frame(PC = 1:126, var_explained = (pca$sdev)^2 / sum((pca$sdev)^2), 
+                      cumulative = cumsum(pca$sdev^2 / sum(pca$sdev^2)))
+
+summary <- summary %>% 
+  mutate(cumulative_perc = cumulative*100)
+
+
+## We only consider the first 30 PCs
+summary <- summary[1:30,]
+
+## Different ways to represent the same data
+summary %>%
+  ggplot(aes(x = sort(as.factor(PC)), y = var_explained)) +
+  geom_bar(stat = "identity", fill = "forest green") +
+  geom_text(aes(label = round(var_explained, digits = 2), vjust = -0.8), size = 2) +
+  theme_minimal() +
+  labs(title = "Variance Explained by each PC") 
+
+summary %>%
+  ggplot(aes(x = sort(as.factor(PC)), y = var_explained))+
+  geom_point(colour = "forest green") +
+  geom_line(group = "PC", colour = "forest green") +
+  theme_minimal() +
+  labs(title = "Variance Explained by each PC")
+
+## Or easily used by calling function in the "factoextra" package
+fviz_eig(pca, col.var="blue")
+
+summary %>%
+  ggplot(aes(x = sort(as.factor(PC)), y = cumulative_perc))+
+  geom_point(colour = "forest green") +
+  geom_line(group = "PC", colour = "forest green") +
+  theme_minimal() +
+  labs(title = "Cumulative Proportion of Variation") 
+
+## Separating the PCA values into its own separate df
+scores <- as.data.frame(pca$x)
+
+## Taking the first 30
+scores <- scores[c(1:30)]
+head(scores)
+
+## Making a metadata data.frame containing all sample information data
+mDat <- cbind(pDat, scores)
+
+```  
+
+Now that we have our PC scores, we'll estimate which of our variables are the ones driving that variation in our data 
+
+```{r PCA-correaltion}
+var <- get_pca_var(pca)
+var
+
+library("corrplot", quietly = TRUE)
+
+## Contribution: first 20 genes, first 10 PCs
+corrplot(var$contrib[1:20, 1:10], is.corr=FALSE)
+
+## Cos2 is called square cosine (squared coordinates) and corresponds 
+## to the quality of representation of variables
+corrplot(var$cos2[1:20, 1:10], is.corr=FALSE)
+
+## NOT RUN
+# fviz_pca_var(pca,
+#              col.var = "cos2", # Color by the quality of representation
+#              gradient.cols = c("darkorchid4", "gold", "darkorange"),
+#              repel = TRUE
+#              )
+
+## Top10 contributions of variables to PC1
+a<-fviz_contrib(pca, choice = "var", axes = 1, top=10)
+
+## Top 10 contributions of variables to PC2
+b<-fviz_contrib(pca, choice = "var", axes = 2, top=10)
+library("gridExtra", quietly = TRUE)
+grid.arrange(a,b, ncol=2, top='Top10 contribution of the variables to the first two PCs')
+
+
+## The results, for individuals (athletes) will be extracted using the 
+## function get_pca_ind(). Similarly to variables, it provides a list 
+## of matrices containing all the results for the individuals (coordinates, 
+## correlation between individuals and axes, squared cosine, and contributions).
+ind <- get_pca_ind(pca)
+ind
+
+fviz_pca_ind(pca,
+             col.ind = "cos2", # Color by the quality of representation
+             gradient.cols = c("darkorchid4", "gold", "darkorange"),
+             repel = TRUE
+             )
+
+## Total contribution on PC1 and PC2
+fviz_contrib(pca, choice = "ind", axes = 1:2)
+```
+
+We'll now plot the first 2 PCs with the variables that seem to be contributing to the most variance in the data.
+
+```{r pca-plots}
+
+mDat %>% 
+  ggplot(aes(x = PC1, y = PC2, colour = COVID)) +
+  geom_point(size = 3) +
+  coord_cartesian(ylim = c(-130, 130), xlim = c(-130, 130)) +
+  labs( x = "Principle Component 1", y = "Principle Component 2", title = "COVID: PC1 vs PC2") +
+  scale_colour_manual(values = c("grey", "orange")) +
+  theme_minimal() 
+
+mDat %>% 
+  ggplot(aes(x = PC1, y = PC2, colour = ICU)) +
+  geom_point(size = 3) +
+  coord_cartesian(ylim = c(-130, 130), xlim = c(-130, 130)) +
+  labs( x = "Principle Component 1", y = "Principle Component 2", title = "ICU: PC1 vs PC2") +
+  scale_colour_manual(values = c("grey", "blue")) +
+  theme_minimal() 
+
+mDat %>% 
+  ggplot(aes(x = PC1, y = PC2, colour = Mechanical_Ventilation)) +
+  geom_point(size = 3) +
+  coord_cartesian(ylim = c(-130, 130), xlim = c(-130, 130)) +
+  labs( x = "Principle Component 1", y = "Principle Component 2", title = "Mechanical Ventilation: PC1 vs PC2") +
+  scale_colour_manual(values = c("grey", "purple")) +
+  theme_minimal()
+
+mDat %>% 
+  mutate(AP_score = case_when(
+    APACHEII_Score <= 10 ~ "less_than_10",
+    between(APACHEII_Score, 11, 20) ~ "eleven_to_20",
+    between(APACHEII_Score, 21, 30) ~ "twentyone_to_30",
+    between(APACHEII_Score, 31, 40) ~ "thirtyone_to_40",
+    APACHEII_Score > 40 ~ "more_than_40")) %>%
+  ggplot(aes(x = PC1, y = PC2, colour = AP_score)) +
+  geom_point(size = 3) +
+  coord_cartesian(ylim = c(-130, 130), xlim = c(-130, 130)) +
+  labs( x = "Principle Component 1", y = "Principle Component 2", title = "APACHEII_Score", subtitle = "Score of disease-severity measured upon admittance to ICU") +
+  theme_minimal() 
+
+## Compare PC2 and PC3
+
+mDat %>% 
+  ggplot(aes(x = PC1, y = PC2, colour = ICU)) +
+  geom_point(size = 3) +
+  coord_cartesian(ylim = c(-130, 130), xlim = c(-130, 130)) +
+  labs( x = "Principle Component 1", y = "Principle Component 2", title = "ICU: PC1 vs PC2") +
+  scale_colour_manual(values = c("grey", "blue")) +
+  theme_minimal() 
+
+mDat %>% 
+  ggplot(aes(x = PC2, y = PC3, colour = ICU)) +
+  geom_point(size = 3) +
+  coord_cartesian(ylim = c(-100, 100), xlim = c(-100, 100)) +
+  labs( x = "Principle Component 2", y = "Principle Component 3", title = "ICU: PC2 vs PC3") +
+  scale_colour_manual(values = c("grey", "blue")) +
+  theme_minimal() 
+
+```  
+
+### 7.0 Differential Expression Analysis  
+
+Okay, now moving into DE analysis: we're going to use the limma package, rather than the more popular DESeq2 or edgeR packages. There's broadly 3 steps to pulling out DE genes:  
+
+1. Specifying your variables of interest to generate a model in the form of a matrix    
+2. Fitting our data to that model
+3. Applying Bayesian statistics to the results of our model
+
+```{r DE-covid}
+
+library(limma)
+## Step 1 
+mm_covid <- model.matrix(~COVID, pDat) ## Always better to use an intercept, as the starting value is not forced to zero
+
+all(rownames(pDat) == colnames(eNorm))
+## step 2
+efit_COVID <- lmFit(eNorm, mm_covid)
+## step 3
+efit_COVID <- efit_COVID %>% 
+  eBayes()
+
+
+topTable(efit_COVID, coef = "COVIDyes", adjust.method = "fdr", p.value = 0.05, sort.by = "p")
+topTable(efit_COVID, coef = "COVIDyes", adjust.method = "fdr", p.value = 0.05, sort.by = "logFC")
+
+## Google GBGT1, S100A9 and COVID - what do we find?
+
+```
+
+We know from our PCA that age doesn't seem to contribute to the variation observed. Let's check whether controlling for age in our model changes the results we obtained  
+
+```{r DE-covid-age}
+
+## We'll first get some statistics on the quality of our model with including age
+
+## Logistic requires categorical to be either yes or no (1 or 0)
+model1 <- glm(as.factor(COVID) ~ Age, data = pDat, family = binomial)
+summary(model1)
+
+## Here the summary shows that age does not seem to strongly correlate 
+## with COVID status, and so hence we would not expect a major change 
+## in our results on including it in our model. However, just to test 
+## that, let's add it to out model and check the resutls.
+
+mm_age <- model.matrix(~COVID + Age, pDat) 
+
+efit_age <- lmFit(eNorm, mm_age) %>% 
+  eBayes()
+
+topTable(efit_age, coef = "COVIDyes", adjust.method = "fdr", p.value = 0.05, sort.by = "p")
+topTable(efit_age, coef = "COVIDyes", adjust.method = "fdr", p.value = 0.05, sort.by = "logFC")
+
+## We see that when arranged by logFC and by adjusted pvalue our model with 
+## and without age shows the same ordering of the genes.
+```  
+
+We saw that lactate concentration was contributing to PC2. Let's check if we should be adjusting for this variable. 
+
+```{r DE-covid-age-lactate}
+
+mm_lactate <- model.matrix(~COVID + Lactate_mmol.l , pDat) 
+mm_lactate_df <- as.data.frame(mm_lactate) 
+
+lactate_logres <- glm(COVIDyes ~ Lactate_mmol.l, data = mm_lactate_df, family = binomial)
+summary(lactate_logres)
+
+## The summary shows that lactate indeed does seem to be significantly associated 
+## with COVID status. Let's visualise that
+mm_lactate_df %>%
+  ggplot(aes(x = Lactate_mmol.l, y = COVIDyes)) +
+  geom_point(alpha = 0.2, colour = "orange") +
+  geom_smooth(method = "glm", method.args = list(family = "binomial"), colour = "orange") +
+  theme_minimal() +
+  labs(title = "Does lactate concentration inform of COVID status?", x = "Lactate (mmol/l)", y = "Probability of COVID-positive status")
+
+## So now we know that there is a significant association with lactate levels and 
+## the probability of having COVID. Let's add lactate to our linear model
+efit_lactate <- lmFit(eNorm, mm_lactate) %>% 
+  eBayes()
+
+topTable(efit_lactate, coef = "COVIDyes", adjust.method = "fdr", p.value = 0.05, sort.by = "p")
+topTable(efit_lactate, coef = "COVIDyes", adjust.method = "fdr", p.value = 0.05, sort.by = "logFC")
+
+``` 
+
+Let's compare the expression of GBGT1 and HBA2 between COVID positive and negative patients.  
+
+```{r GBGT1-HBA2}
+pDat <- pDat %>% 
+  rownames_to_column(var = "sample")
+
+covid <- pDat %>% 
+  dplyr::select(sample, COVID)
+
+GBGT1 <- eNorm %>%
+  rownames_to_column(var = "gene") %>%
+  filter(gene == "GBGT1") %>%
+  column_to_rownames(var = "gene")
+
+GBGT1 <- as.data.frame(t(GBGT1))
+
+GBGT1 <- GBGT1 %>%
+  rownames_to_column(var = "sample")
+
+GBGT1 <- GBGT1 %>%
+  left_join(covid, by = "sample")
+
+GBGT1 %>%
+  ggplot(aes(x = COVID, y = log2(GBGT1), fill = COVID)) +
+  geom_violin() +
+  scale_fill_manual(values = c("gray", "orange")) +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  labs(x = "COVID Status", y = "log2 (GBGT1 RPM)", title = "GBGT1: Gene with lowest adjusted p-value with or without accounting for lactate")
+
+
+
+HBA2 <- eNorm %>% 
+  rownames_to_column(var = "gene") %>% 
+  filter(gene == "HBA2") %>% 
+  column_to_rownames(var = "gene")
+  
+HBA2 <- as.data.frame(t(HBA2))
+
+HBA2 <- HBA2 %>% 
+  rownames_to_column(var = "sample")
+  
+HBA2 <- HBA2 %>% 
+  left_join(covid, by = "sample")
+
+HBA2 %>% 
+  ggplot(aes(x = COVID, y = log2(HBA2), fill = COVID)) +
+  geom_violin() +
+  geom_dotplot(binaxis = "y", stackdir = "center", dotsize = 0.7, fill = "black") +
+  scale_fill_manual(values = c("gray", "orange")) +
+  theme_minimal() + 
+  theme(legend.position = "bottom") +
+  labs(x = "COVID Status", y = "log2 (HBA2 RPM)", title = "HBA2: Gene with highest negative logFC change on including lactate concentration in the model")
+
+HBA2 %>%
+  ggplot(aes(x = sample, y = log2(HBA2), colour = COVID)) +
+  geom_point() +
+  scale_colour_manual(values = c("gray", "orange")) +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  labs(x = "COVID Status", y = "log2 (HBA2 RPM)", title = "HBA2: Gene with highest negative logFC change on including lactate concentration in the model") +
+  facet_grid(~COVID)
+
+```
+
+A popular way of combining the above information - p-values and FCs is a volcano plot. Let's now select all of the DEG that we got when we included lactate measurement in out model to generate a volcano plot.
+
+```{r}
+volcanoplot(efit_lactate, coef = "COVIDyes", highlight=5, style = "p-value", names = rownames(efit_lactate$coefficients), hl.col="blue")
+
+volcanoplot(efit_lactate, coef = "COVIDyes", highlight=5, style = "p-value", names = rownames(efit_lactate$coefficients), hl.col="blue", xlim=c(-500,500))
+
+a = topTable(efit_lactate, coef = "COVIDyes", adjust.method = "fdr", p.value = 0.05, sort.by = "p")
+```
+
+
+### 8.0 Enrichment Analysis
+
+```{r GO-enrichment}
+
+# BiocManager::install("biomaRt")
+
+library(biomaRt)
+
+listMarts() # gives us the list of databases available
+ensembl=useMart("ensembl")
+
+## Which all species are present from the ensembl database?
+head(listDatasets(ensembl))
+
+## We'll make a variable selecting the Homo sapiens dataset
+mart = useMart("ensembl", dataset="hsapiens_gene_ensembl")
+
+## Using the DEGs we got from the lactate model
+genes <- topTable(efit_lactate, coef = "COVIDyes", adjust.method = "fdr", p.value = 0.01, n = Inf, sort.by = "logFC")
+genes <- rownames(genes)
+
+## We'll only use the top 200 genes, as the maximum number of queries biomaRt can take is 500
+genes <- genes[1:200]
+
+## We require the Entrz IDs for all functions after this step - so converting HGNC Symbols to Entrez IDs
+hgnc_to_entrez <- getBM(attributes = c("hgnc_symbol", "entrezgene_id"), filters = "hgnc_symbol", values = genes, mart = mart)
+
+## Check all choices
+filters <- listFilters(mart) #filters are the parameters you search by
+attr <- listAttributes(mart) #attributes are the matching parameters you're wanting to search for
+
+head(hgnc_to_entrez)
+
+## Selecting attributes as the GO id, the GO term, the GO term definition, and the cell 
+## compartment that GO term belongs to, searching by the filter/parameter HGNC symbol
+go_terms <- getBM(attributes = c("hgnc_symbol", "go_id", "name_1006", "definition_1006", "namespace_1003"), filters = "hgnc_symbol", values = genes, mart = mart)
+
+head(go_terms)
+
+## Deleting all empty rows
+go_terms <- go_terms %>% 
+  mutate_all(na_if,"")
+go_terms <- na.omit(go_terms)
+
+## Counting the frequency of each GO term
+go_plot <- go_terms %>% 
+  dplyr::count(name_1006) %>% 
+  dplyr::arrange(desc(n))
+
+## We know that the total DEGs we selected were 200, so let's get the 
+## percentage of how many of the genes were associated with a particular GO Term
+head(go_plot)
+
+go_plot$total <- 200
+go_plot <- go_plot[-1,]
+go_plot <- go_plot %>% 
+  mutate(perc = (n/total)*100) %>% 
+  dplyr::arrange()
+
+## For the first 20 GO Terms
+go_plot[1:20,] %>%
+  ggplot(aes(x = reorder(name_1006, -perc), y = perc)) +
+  geom_bar(stat = "identity", width = 0.6) +
+  coord_cartesian(y = c(0,100)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Top 20 GO Terms", subtitle = "For DEGs at adjpval <= 0.05", x = "GO Term", y = "Percentage of DEGs assoc. with GO Term")
+
+## Let's all add the cellular compartment to our plot
+component <- go_terms %>% 
+  dplyr::select(name_1006, namespace_1003) %>% 
+  distinct(name_1006, .keep_all = TRUE)
+
+head(component)
+
+go_plot <- go_plot %>% 
+  right_join(component, by = "name_1006")
+
+head(go_plot)
+
+```
+
+```{r GOplot, fig.height=4, width = 4}
+
+go_plot[1:20,] %>% 
+  ggplot(aes(x = reorder(name_1006, -perc), y = perc, fill = namespace_1003)) +
+  geom_bar(stat = "identity", width = 0.6) +
+  scale_fill_manual(values = c("maroon", "navy", "forest green")) +
+  coord_cartesian(y = c(0,100)) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "bottom") +
+  scale_y_continuous(breaks = seq(0, 100, 10)) +
+  labs(title = "Top 20 GO Terms", subtitle = "For DEGs at adjpval <= 0.05", x = "GO Term", y = "Percentage of DEGs assoc. with GO Term")
+
+```  
+
+Let's look at the KEGG pathways associated with our DEGs   
+
+```{r KEGG}
+# BiocManager::install("clusterProfiler")
+library(clusterProfiler, quietly = TRUE)
+
+k <- enrichKEGG(gene = genes, organism = "hsa")
+
+##When we input our genes as HGNC IDs, the function doesn't work. We'll use our Entrez IDs that we have
+head(hgnc_to_entrez)
+k <- enrichKEGG(gene = hgnc_to_entrez$entrezgene_id, organism = "hsa")
+head(k)
+
+kegg_res = k@result
+
+```
